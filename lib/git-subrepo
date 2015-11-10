@@ -223,7 +223,12 @@ command:push() {
 command:fetch() {
   command-setup +subdir
   subrepo:fetch
-  say "Fetched '$subrepo_remote' ($subrepo_branch)."
+  if OK; then
+      say "Fetched '$subrepo_remote' ($subrepo_branch)."
+  elif [[ "$CODE" -eq -1 ]]; then
+      say "Subrepo '$subrepo_remote' ($subrepo_branch) already fetched."
+  fi
+  return 0
 }
 
 # `git subrepo branch <subdir>` command:
@@ -343,40 +348,22 @@ Git Version: $git_version
 subrepo:clone() {
   re="$1"
 
-  # Turn off force unless really a reclone:
-  if $force_wanted && [ ! -f "$gitrepo" ]; then
-    force_wanted=false
-  fi
-
-  if $force_wanted; then
-    o "--force indicates a reclone."
-    o "Fetch the upstream: $subrepo_remote ($subrepo_branch):"
-    CALL subrepo:fetch
-    read-gitrepo-file
-    o "Check if we already are up to date."
-    if [ "$upstream_head_commit" == "$subrepo_commit" ]; then
-      reclone_up_to_date=true
-      return
-    fi
-    o "Remove the old subdir."
-    RUN git rm -r "$subdir"
-  else
-    assert-subdir-empty
-    if [ -z "$subrepo_branch" ]; then
-      o "Determine the upstream head branch."
-      get-upstream-head-branch
-      subrepo_branch="$output"
-    fi
-    o "Fetch the upstream: $subrepo_remote ($subrepo_branch):"
-    CALL subrepo:fetch
+  assert-subdir-empty
+  if [ -z "$subrepo_branch" ]; then
+    o "Determine the upstream head branch."
+    get-upstream-head-branch
+    subrepo_branch="$output"
   fi
 
   o "Make the directory '$subdir/' for the clone."
   RUN mkdir -p "$subdir"
 
-  o "Commit the new '$subdir/' content:"
-  subrepo_commit_ref="$upstream_head_commit"
-  CALL subrepo:commit
+  o "Fetch the upstream: $subrepo_remote ($subrepo_branch):"
+  CALL subrepo:fetch
+
+  o "Merge to the current fetch, this should always be a fastforward"
+  # TODO: replace with correct branch name
+  RUN git merge "subrepo/$subdir/fetch"
 }
 
 # Init a new subrepo from current repo:
@@ -420,7 +407,7 @@ subrepo:init() {
   git:make-ref "$refs_subrepo_commit" "$subrepo_commit_ref"
 }
 
-# Properly merge a local subrepo branch with upstream and commit to mainline:
+# Properly merge a fetched branch and commit it to mainline:
 subrepo:pull() {
   o "Fetch the upstream: $subrepo_remote ($subrepo_branch):"
   CALL subrepo:fetch
@@ -430,34 +417,9 @@ subrepo:pull() {
     OK=false; CODE=-1; return
   fi
 
-  local branch_name="subrepo/$subdir"
-  if git:branch-exists "$branch_name"; then
-    o "Deleting old '$branch_name' branch."
-    RUN git branch -D "$branch_name"
-  fi
-  o "Create subrepo branch '$branch_name':"
-  CALL subrepo:branch
-  if OK; then
-    o "git rebase $upstream_ref $branch_name"
-    FAIL=false OUT=true RUN git rebase "$refs_subrepo_fetch" "$branch_name"
-    if ! OK; then
-      o "The rebase command failed:"$'\n'----$'\n'"$output"$'\n'----
-      CODE=1; return
-    fi
-    o "Checkout '$original_head_branch'."
-    git checkout --quiet "$original_head_branch"
-  else
-    o "Subrepo branch failed. No local subrepo commits to merge."
-    o "Create branch '$branch_name' from the fetched upstream instead."
-    RUN git branch "$branch_name" "$refs_subrepo_fetch"
-  fi
-
-  o "Commit the new '$subdir/' content:"
-  subrepo_commit_ref="$branch_name"
-  CALL subrepo:commit
-
-  o "Create ref '$refs_subrepo_pull' for branch '$branch_name'."
-  git:make-ref "$refs_subrepo_pull" "$branch_name"
+  o "Merge to the current fetch"
+  # TODO: replace with correct branch name
+  RUN git merge "subrepo/$subdir/fetch"
 }
 
 # Push a properly merged subrepo branch upstream:
@@ -556,6 +518,22 @@ subrepo:fetch() {
   OUT=true RUN git rev-parse FETCH_HEAD
   upstream_head_commit="$output"
 
+  if [ "$upstream_head_commit" == "$subrepo_commit" ]; then
+    OK=false; CODE=-1; return
+  fi
+
+  # Create a new branch from current point
+  # TODO: Fix this fetch branch
+  RUN git checkout -B "subrepo/$subdir/fetch"
+
+  # Copy in subrepo changes into this
+  subrepo_commit_ref=$upstream_head_commit
+  CALL subrepo:commit
+  
+  # Rewrite parent for this commit to be previous fetch
+  
+
+  # Fix the remote
   local output=$(git config "remote.subrepo/$subdir.url")
   if [ -z "$output" ]; then
     o "Create subrepo remote 'subrepo/$subdir' -> '$subrepo_remote'."
@@ -567,8 +545,13 @@ subrepo:fetch() {
     fi
   fi
 
-  o "Create ref '$refs_subrepo_fetch'."
-  git:make-ref "$refs_subrepo_fetch" FETCH_HEAD
+  o "Go back to '$original_head_branch'."
+  if [ "$original_head_commit" != none ]; then
+    RUN git checkout "$original_head_branch"
+  else
+    # We are working with empty things
+    RUN git checkout -B "$original_head_branch"
+  fi
 }
 
 # Create a subrepo branch of changes since last pull:

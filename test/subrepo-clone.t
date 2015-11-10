@@ -35,7 +35,9 @@ clone-foo-and-bar
   is "$clone_output" \
     "Subrepo '../../../tmp/upstream/bar' (master) cloned into 'bar'." \
     'subrepo clone command output is correct'
+}
 
+{
   clone_output_empty="$(
     cd $OWNER/empty
     git subrepo clone ../../../$UPSTREAM/bar
